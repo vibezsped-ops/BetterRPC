@@ -1,0 +1,14 @@
+{
+  "name": "CustomRPC",
+  "description": "Custom Rich Presence with presets, playlist, activity modes and URL/asset image support.",
+  "authors": [
+    {
+      "name": "you",
+      "id": "000000000000000000"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "ic_activity_24px"
+  }
+}

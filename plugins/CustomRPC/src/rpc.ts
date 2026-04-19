@@ -1,105 +1,60 @@
-import { FluxDispatcher } from "@vendetta/metro/common";
-import { findByProps } from "@vendetta/metro";
+import { findByProps, findByStoreName } from "@vendetta/metro";
 import { logger } from "@vendetta";
-import { cloneAndFilter, isUrl } from "./utils";
 import type { RPCProfile, PlaylistTrack } from "./types";
-
-const assetManager = findByProps("getAssetIds");
-const pluginStartSince = Date.now();
 
 let playlistTimer: ReturnType<typeof setTimeout> | null = null;
 let currentTrackIndex = 0;
 
-// Rozwiązuje obrazek: URL zostawia jak jest, asset key próbuje pobić przez API
-async function resolveImage(appId: string, key: string | undefined): Promise<string | undefined> {
-  if (!key) return undefined;
-  if (isUrl(key)) return key; // już jest URL, Discord to akceptuje
+function buildStatusText(profile: RPCProfile, track?: PlaylistTrack): string {
+  if (track) {
+    return [track.name, track.details, track.state].filter(Boolean).join(" · ");
+  }
+  return [profile.name, profile.details, profile.state].filter(Boolean).join(" · ");
+}
 
+async function setCustomStatus(text: string): Promise<void> {
   try {
-    let ids = assetManager.getAssetIds(appId, [key]);
-    if (!ids?.length) ids = await assetManager.fetchAssetIds(appId, [key]);
-    return ids?.[0] ?? key;
+    const UserSettingsProtoUtils = findByProps("updateAsync");
+    await UserSettingsProtoUtils.updateAsync("status", (s: any) => {
+      s.status.customStatus.text = text;
+      s.status.customStatus.emojiName = "";
+    });
+    logger.log("[CustomRPC] Status set:", text);
   } catch (e) {
-    logger.warn("[CustomRPC] Failed to resolve asset key:", key, e);
-    return key; // fallback — wróć klucz
+    logger.warn("[CustomRPC] Proto failed, trying REST:", e);
+    try {
+      const RestAPI = findByProps("patch", "post", "put");
+      await RestAPI.patch({
+        url: "/users/@me/settings",
+        body: { custom_status: { text, emoji_name: null } },
+      });
+      logger.log("[CustomRPC] Status set via REST:", text);
+    } catch (e2) {
+      logger.error("[CustomRPC] Both methods failed:", e2);
+    }
   }
 }
 
-export async function sendActivity(profile: RPCProfile, trackOverride?: PlaylistTrack): Promise<void> {
-  const source = trackOverride
-    ? {
-        ...profile,
-        name: trackOverride.name ?? profile.name,
-        details: trackOverride.details ?? profile.details,
-        state: trackOverride.state ?? profile.state,
-        assets: { ...profile.assets, ...trackOverride.assets },
-      }
-    : profile;
-
-  let activity: any = cloneAndFilter(source);
-
-  // Timestamps
-  const tsEnabled = profile.timestamps._enabled;
-  if (tsEnabled) {
-    activity.timestamps = {
-      start: profile.timestamps.start ?? pluginStartSince,
-    };
-    if (profile.timestamps.end && profile.timestamps.end > 0) {
-      activity.timestamps.end = profile.timestamps.end;
-    }
-    // Playlist: nadpisz timestamps na czas trwania tracka
-    if (trackOverride && trackOverride.durationMs > 0) {
-      const now = Date.now();
-      activity.timestamps = { start: now, end: now + trackOverride.durationMs };
-    }
-  } else {
-    delete activity.timestamps;
-  }
-
-  // Obrazki
-  if (activity.assets) {
-    activity.assets.large_image = await resolveImage(activity.application_id, activity.assets.large_image);
-    activity.assets.small_image = await resolveImage(activity.application_id, activity.assets.small_image);
-    // Wyczyść puste
-    if (!activity.assets.large_image) delete activity.assets.large_image;
-    if (!activity.assets.small_image) delete activity.assets.small_image;
-    if (!activity.assets.large_text) delete activity.assets.large_text;
-    if (!activity.assets.small_text) delete activity.assets.small_text;
-    if (Object.keys(activity.assets).length === 0) delete activity.assets;
-  }
-
-  // Buttons
-  if (activity.buttons?.length) {
-    const validBtns = activity.buttons.filter((b: any) => b?.label?.trim());
-    if (validBtns.length) {
-      activity.metadata = { button_urls: validBtns.map((b: any) => b.url ?? "") };
-      activity.buttons = validBtns.map((b: any) => b.label);
-    } else {
-      delete activity.buttons;
-    }
-  } else {
-    delete activity.buttons;
-  }
-
-  FluxDispatcher.dispatch({
-    type: "LOCAL_ACTIVITY_UPDATE",
-    activity,
-    pid: 1608,
-    socketId: "CustomRPC@Revenge",
-  });
-
-  logger.log("[CustomRPC] Activity sent:", activity);
-}
-
-export function clearActivity(): void {
+export async function clearActivity(): Promise<void> {
   stopPlaylist();
-  FluxDispatcher.dispatch({
-    type: "LOCAL_ACTIVITY_UPDATE",
-    activity: null,
-    pid: 1608,
-    socketId: "RPC@Reveg",
-  });
-  logger.log("[CustomRPC] Activity cleared");
+  try {
+    const UserSettingsProtoUtils = findByProps("updateAsync");
+    await UserSettingsProtoUtils.updateAsync("status", (s: any) => {
+      s.status.customStatus.text = "";
+      s.status.customStatus.emojiName = "";
+    });
+    logger.log("[CustomRPC] Status cleared");
+  } catch (e) {
+    try {
+      const RestAPI = findByProps("patch", "post", "put");
+      await RestAPI.patch({
+        url: "/users/@me/settings",
+        body: { custom_status: null },
+      });
+    } catch (e2) {
+      logger.error("[CustomRPC] Failed to clear status:", e2);
+    }
+  }
 }
 
 export function stopPlaylist(): void {
@@ -111,13 +66,12 @@ export function stopPlaylist(): void {
 
 export async function startProfile(profile: RPCProfile): Promise<void> {
   stopPlaylist();
-
   const pl = profile.playlist;
   if (pl?.enabled && pl.tracks.length > 0) {
     currentTrackIndex = pl._currentIndex ?? 0;
     await playTrack(profile, currentTrackIndex);
   } else {
-    await sendActivity(profile);
+    await setCustomStatus(buildStatusText(profile));
   }
 }
 
@@ -129,8 +83,8 @@ async function playTrack(profile: RPCProfile, index: number): Promise<void> {
   currentTrackIndex = index;
   if (profile.playlist) profile.playlist._currentIndex = index;
 
-  await sendActivity(profile, track);
-  logger.log(`[CustomRPC] Playlist: playing track ${index} — "${track.name}"`);
+  await setCustomStatus(buildStatusText(profile, track));
+  logger.log(`[CustomRPC] Playlist: track ${index} — "${track.name}"`);
 
   const duration = track.durationMs > 0 ? track.durationMs : 0;
   if (duration > 0) {
@@ -139,9 +93,9 @@ async function playTrack(profile: RPCProfile, index: number): Promise<void> {
       if (nextIndex < pl.tracks.length) {
         await playTrack(profile, nextIndex);
       } else if (pl.loop) {
-        await playTrack(profile, 0); // wróć do początku
+        await playTrack(profile, 0);
       } else {
-        clearActivity(); // koniec playlisty bez loopa
+        await clearActivity();
       }
     }, duration);
   }

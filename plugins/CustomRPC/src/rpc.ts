@@ -97,7 +97,7 @@ export function clearActivity(): void {
     type: "LOCAL_ACTIVITY_UPDATE",
     activity: null,
     pid: 1608,
-    socketId: "CustomRPC@Revenge",
+    socketId: "RPC@Reveg",
   });
   logger.log("[CustomRPC] Activity cleared");
 }
